@@ -1,0 +1,17 @@
+name = "jira"
+version = "1.0.0"
+author = "IndraMesh"
+license = "Apache-2.0"
+api_version = "1.0.0"
+capabilities = ["api_routes", "task_type", "connector"]
+module = "module"
+requires_worker_update = true
+
+[frontend]
+bundle = "static/jira.js"
+extension_points = ["pages", "navItems", "taskForms", "connectorConfigEditors", "schemaSettingsSections", "objectTypeSettingsSections", "objectDetailSections", "itemBadges"]
+
+[database]
+migrations_dir = "migrations"
+version_table = "alembic_version_jira"
+require_restricted_role = true
