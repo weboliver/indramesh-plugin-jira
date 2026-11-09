@@ -19,6 +19,9 @@ Phase 295 config editors consume (JSYNC-07/08/09).
   newest real pull and push runs, the open resumable checkpoints and the pending
   conflict counts (JSYNC-08).
 * :func:`count_destination_object_types` backs the export pre-check (JSYNC-05).
+* :func:`load_endpoint_target` reads the endpoint row's OWN current URL and
+  ``config`` for the connect-time outbound guard (SESS-07, 321-05): it answers
+  before the first bind, which the bind-snapshot projection cannot.
 
 Only stdlib, ``sqlalchemy``, ``httpx`` and sibling plugin modules are imported (the
 plugin AST gate); no ``app.*`` import ever appears here.
@@ -71,6 +74,19 @@ _SOURCE_ENDPOINT_SQL = text(
 _TARGET_ENDPOINT_SQL = text(
     "SELECT id, connector_type, target_url FROM targets "
     "WHERE id = CAST(:id AS uuid) FOR SHARE"
+)
+
+# The endpoint row's OWN current URL and config — the values the connect-time
+# outbound guard must read. Deliberately not ``_SOURCE_ENDPOINT_SQL`` (which also
+# carries the revision stamp) and deliberately not the connection projection:
+# ``get_connection`` returns ``None`` before the first bind and keeps only the
+# bind snapshot ``base_url``, so it cannot answer "what is this endpoint's
+# current URL and its flag".
+_SOURCE_TARGET_SQL = text(
+    "SELECT source_url AS url, config FROM sources WHERE id = CAST(:id AS uuid)"
+)
+_TARGET_TARGET_SQL = text(
+    "SELECT target_url AS url, config FROM targets WHERE id = CAST(:id AS uuid)"
 )
 
 _SOURCE_CONNECTION_SQL = text(
@@ -288,6 +304,28 @@ async def get_connection(session, *, kind, endpoint_id):
     return project_connection(row, kind=kind)
 
 
+async def load_endpoint_target(session, *, kind, endpoint_id):
+    """The endpoint's OWN current ``url`` and ``config``, or ``None``.
+
+    Reads the Source/Target row itself, which is what makes the connect-time
+    outbound guard cover a FIRST bind (no ``plugin_jira_connections`` row exists
+    yet, so :func:`get_connection` would answer ``None``) and a repeat PUT where
+    only the strategy changes. One read feeds every call site.
+
+    ``None`` means the endpoint row is gone. Every caller must treat that as a
+    REFUSAL, never as a pass: a missing row is not an endpoint that may be
+    dialled. A first bind reads exactly the same fields as a repeat PUT, because
+    the row is the Source/Target itself and not the bind snapshot.
+    """
+    sql = _SOURCE_TARGET_SQL if kind == SOURCE else _TARGET_TARGET_SQL
+    row = (
+        await session.execute(sql, {"id": str(endpoint_id)})
+    ).mappings().first()
+    if row is None:
+        return None
+    return {"url": row["url"], "config": row["config"]}
+
+
 async def _existing(session, *, kind, endpoint_id, strategy, service_account):
     """Apply a strategy/default-account change to an existing connection.
 
@@ -466,6 +504,11 @@ async def run_connection_test(base_url, token, *, jira_schema_id=None, transport
     Probes ``/rest/api/2/myself``, the schema list and (only when a schema id is
     given) that one schema. The returned message is a fixed per-category string:
     no Jira response body and no token ever crosses this boundary (T-294-06).
+
+    ``base_url`` must already have passed ``assert_target_allowed`` at the caller
+    — ``routes.test_source_connection`` / ``test_target_connection`` guard it
+    immediately before the call. This helper carries no endpoint id, so it cannot
+    guard itself; never call it with an unguarded URL.
     """
     try:
         client = JiraPullClient(base_url=base_url, pat=token, transport=transport)
@@ -500,7 +543,13 @@ async def run_connection_test(base_url, token, *, jira_schema_id=None, transport
 async def count_destination_object_types(
     base_url, token, jira_schema_id, *, transport=None
 ):
-    """``{object_type_count, empty}`` for a Jira schema — the export precondition."""
+    """``{object_type_count, empty}`` for a Jira schema — the export precondition.
+
+    ``base_url`` must already have passed ``assert_target_allowed`` at the caller
+    — ``routes.get_target_object_type_count``, the only one, guards it immediately
+    before the call. This helper carries no endpoint id, so it cannot guard
+    itself; never call it with an unguarded URL.
+    """
     client = JiraPullClient(base_url=base_url, pat=token, transport=transport)
     try:
         object_types = await client.get_object_types(jira_schema_id)

@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.1] - 2026-11-09
+
+### Security
+
+- Every request that carries a stored Jira token checks its target address first, on pull, push, export and the connection test, so a Source or Target URL that resolves to a non-public address is refused. An existing Source or Target at an internal address stops syncing until a superuser sets `allow_internal_target` to `true` in its `config`.
 
 ## [1.0.0] - 2026-11-01
 

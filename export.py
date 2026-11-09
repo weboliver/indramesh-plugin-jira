@@ -31,6 +31,7 @@ from .client import JiraPullApiError, JiraPullAuthError, JiraPullClient
 from .conflicts import write_sync_audit
 from .link_guard import normalize_url
 from .links import LinkStore
+from .outbound import assert_target_allowed
 from .pull import _load_connection
 from .push import (
     PushCounters,
@@ -493,6 +494,14 @@ async def run_export(ctx, task_id, **kwargs: Any) -> dict:  # noqa: ARG001
                 raise PluginTaskError(
                     "The bound service account has no Jira token."
                 )
+
+            # SESS-07 (D-06): the Target URL about to receive the PAT is re-vetted
+            # against a fresh answer on every export, reading the Target row's own
+            # current URL and its flag. It runs before ``client`` exists, so a
+            # refused export dials nothing and writes nothing.
+            await assert_target_allowed(
+                session, kind="target", endpoint_id=target_id
+            )
 
             client = JiraPullClient(
                 base_url=scope["target_url"],

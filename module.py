@@ -158,6 +158,7 @@ class JiraPlugin(ApiRoutesPlugin, TaskTypePlugin, ConnectorPlugin):
                 applies_to=frozenset({"source", "target"}),
                 label=JIRA_CONNECTOR_LABEL,
                 requires_url=frozenset({"target"}),
+                requires_public_url=frozenset({"source", "target"}),
                 requires_schema_id=frozenset({"target"}),
                 config_model=JiraConnectorConfig,
             )

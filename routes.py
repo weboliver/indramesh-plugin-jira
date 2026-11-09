@@ -63,6 +63,7 @@ from .connections import (
     upsert_connection,
 )
 from .link_guard import is_stale_binding
+from .outbound import assert_target_allowed
 from .system_attributes import is_jira_metadata
 from .links import (
     SYNC_DIRECTIONS,
@@ -565,6 +566,20 @@ async def _live_base_url(session, *, kind, endpoint_id) -> str:
     return connection["base_url"]
 
 
+async def _guard_pat_target(session, *, kind, endpoint_id) -> None:
+    """Refuse a request that would send the PAT to a non-vetted host (SESS-07).
+
+    The one HTTP mapping for the connect-time outbound gate: the plugin helper
+    raises the bounded ``PluginTaskError`` reason (never the URL), and every
+    dialling route reports it as 422 through here so exactly one translation
+    exists. A missing endpoint row is a refusal, never a pass.
+    """
+    try:
+        await assert_target_allowed(session, kind=kind, endpoint_id=endpoint_id)
+    except PluginTaskError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
 async def _default_account_change(session, payload, *, kind, endpoint_id):
     """The connection's default-account change, validated against the endpoint.
 
@@ -625,6 +640,14 @@ def _project_schemas(payload) -> list[dict]:
 
 
 async def _list_jira_schemas(base_url: str, token: str) -> list[dict]:
+    """Read the Jira schema list for an already-vetted ``base_url``.
+
+    ``base_url`` must already have passed ``assert_target_allowed`` (through
+    ``_guard_pat_target``) at the caller — ``list_source_schemas`` and
+    ``list_target_schemas`` do that immediately before the call. This helper
+    carries no endpoint id, so it cannot guard itself; never call it with an
+    unguarded URL.
+    """
     client = JiraPullClient(base_url=base_url, pat=token, transport=_make_transport())
     try:
         payload = await client.get_schemas()
@@ -731,6 +754,10 @@ def register_jira_routes(ctx) -> APIRouter:
             account = await _load_account(
                 session, service_account_id, expect="source", endpoint_id=source_id
             )
+            # SESS-07: guard the URL ``_list_jira_schemas`` is about to dial. That
+            # helper takes only ``(base_url, token)``, so it cannot guard itself —
+            # every caller does, immediately before the call.
+            await _guard_pat_target(session, kind="source", endpoint_id=source_id)
             try:
                 schemas = await _list_jira_schemas(
                     source["source_url"], account["token"]
@@ -813,6 +840,10 @@ def register_jira_routes(ctx) -> APIRouter:
             account = await _load_account(
                 session, payload.service_account_id, expect="source", endpoint_id=source_id
             )
+            # SESS-07: the Source row's own current URL, vetted before it receives
+            # the PAT. ``_live_base_url`` above already refused a repointed Source,
+            # so for a live binding the guarded host is the dialled host.
+            await _guard_pat_target(session, kind="source", endpoint_id=source_id)
             client = JiraPullClient(
                 base_url=source["source_url"],
                 pat=account["token"],
@@ -899,6 +930,9 @@ def register_jira_routes(ctx) -> APIRouter:
             account = await _load_account(
                 session, service_account_id, expect="target", endpoint_id=target_id
             )
+            # SESS-07: same guard for the Target's schema list (see the Source
+            # handler): ``_list_jira_schemas`` cannot guard itself.
+            await _guard_pat_target(session, kind="target", endpoint_id=target_id)
             try:
                 schemas = await _list_jira_schemas(
                     target["target_url"], account["token"]
@@ -1072,6 +1106,21 @@ def register_jira_routes(ctx) -> APIRouter:
             service_account = await _default_account_change(
                 session, payload, kind="source", endpoint_id=source_id
             )
+            # SESS-07 (D-06): guard BEFORE the snapshot is written, against the
+            # Source row's CURRENT URL and its own config — exactly the value
+            # ``upsert_connection`` is about to snapshot as ``base_url``.
+            #
+            # Three no-row consequences this ordering depends on:
+            # 1. First bind: no ``plugin_jira_connections`` row exists yet, so a
+            #    bind-snapshot read would have nothing to check. The guard reads
+            #    the Source row itself, so it is not skipped; a refusal writes no
+            #    snapshot (the INSERT is never reached).
+            # 2. Repeat PUT on a live binding: the guard runs once more against the
+            #    same current URL, then ``_existing`` updates only the strategy.
+            # 3. Stale binding: the guard runs first, so a Source repointed at an
+            #    internal host is refused with 422 before the 409 could be
+            #    reached. Re-stamping a stale binding stays out of scope.
+            await _guard_pat_target(session, kind="source", endpoint_id=source_id)
             connection, created = await upsert_connection(
                 session,
                 kind="source",
@@ -1108,6 +1157,12 @@ def register_jira_routes(ctx) -> APIRouter:
                 expect="source",
                 endpoint_id=source_id,
             )
+            # SESS-07: the guard runs BEFORE the PAT is handed to the probe and
+            # before the stale-binding 409, so a repointed Source resolving
+            # internally is refused (422) rather than dialled. For a live binding
+            # ``_live_base_url`` returns ``normalize_url(<source_url>)``, i.e. the
+            # same host this guard just resolved — the guarded URL is the dialled one.
+            await _guard_pat_target(session, kind="source", endpoint_id=source_id)
             base_url = await _live_base_url(
                 session, kind="source", endpoint_id=source_id
             )
@@ -1164,6 +1219,19 @@ def register_jira_routes(ctx) -> APIRouter:
             service_account = await _default_account_change(
                 session, payload, kind="target", endpoint_id=target_id
             )
+            # SESS-07 (D-06): guard BEFORE the snapshot is written, against the
+            # Target row's CURRENT URL and its own config — exactly the value
+            # ``upsert_connection`` is about to snapshot as ``base_url``.
+            #
+            # 1. First bind: no ``plugin_jira_connections`` row exists yet, so a
+            #    bind-snapshot read would have nothing to check. The guard reads
+            #    the Target row itself; a refusal writes no snapshot.
+            # 2. Repeat PUT on a live binding: same current URL, and ``_existing``
+            #    then updates only the strategy.
+            # 3. Stale binding: the guard runs first, so a Target repointed at an
+            #    internal host is refused with 422 before the 409 could be
+            #    reached. Re-stamping a stale binding stays out of scope.
+            await _guard_pat_target(session, kind="target", endpoint_id=target_id)
             connection, created = await upsert_connection(
                 session,
                 kind="target",
@@ -1197,6 +1265,7 @@ def register_jira_routes(ctx) -> APIRouter:
                 expect="target",
                 endpoint_id=target_id,
             )
+            await _guard_pat_target(session, kind="target", endpoint_id=target_id)
             base_url = await _live_base_url(
                 session, kind="target", endpoint_id=target_id
             )
@@ -1249,6 +1318,10 @@ def register_jira_routes(ctx) -> APIRouter:
                 expect="target",
                 endpoint_id=target_id,
             )
+            # SESS-07: the export pre-check sends the PAT to the Target URL, so it
+            # is vetted here; ``count_destination_object_types`` takes no endpoint
+            # id and cannot guard itself.
+            await _guard_pat_target(session, kind="target", endpoint_id=target_id)
             try:
                 result = await count_destination_object_types(
                     target["target_url"],
