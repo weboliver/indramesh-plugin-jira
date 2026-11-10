@@ -54,6 +54,7 @@ from .conflicts import (
 )
 from .link_guard import normalize_url
 from .links import LinkStore, load_source_object_links
+from .outbound import assert_target_allowed
 from .system_attributes import JIRA_METADATA, is_jira_metadata
 from .pull import (
     _load_connection,
@@ -1944,6 +1945,13 @@ async def run_push(ctx, task_id, **kwargs: Any) -> dict:
                 raise PluginTaskError(
                     "The bound service account has no Jira token."
                 )
+
+            # SESS-07 (D-06): the Target URL about to receive the PAT is re-vetted
+            # against a fresh answer on every run, and reads the Target row's own
+            # current URL and flag.
+            await assert_target_allowed(
+                session, kind="target", endpoint_id=target_id
+            )
 
             client = JiraPullClient(
                 base_url=scope["target_url"],

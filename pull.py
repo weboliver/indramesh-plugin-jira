@@ -82,6 +82,7 @@ from .links import (
     load_type_object_links,
 )
 from .media import reconcile_object_media
+from .outbound import assert_target_allowed
 from .protection import reconcile_write_protection
 from .system_attributes import JIRA_METADATA, METADATA_MARKER, is_jira_metadata
 from .value_merge import (
@@ -2719,6 +2720,12 @@ async def run_pull(ctx, task_id, **kwargs: Any) -> dict:
                 raise PluginTaskError(
                     "The bound service account has no Jira token."
                 )
+
+            # SESS-07 (D-06): the URL about to receive the PAT is re-vetted
+            # against a FRESH answer on every request, because the save-time
+            # answer can be stale. Reads the Source row's own URL and flag, so a
+            # first bind is covered as well.
+            await assert_target_allowed(session, kind="source", endpoint_id=source_id)
 
             client = JiraPullClient(
                 base_url=connection["core_source_url"],

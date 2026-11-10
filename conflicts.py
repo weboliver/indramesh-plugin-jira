@@ -1065,7 +1065,7 @@ async def resolve_conflict(
     or a sync-owned (non-``both``) direction refuses with 409 and changes nothing.
     """
     from .checkpoints import upsert_attribute_baseline, upsert_value_baseline
-    from .routes import _load_account
+    from .routes import _guard_pat_target, _load_account
 
     row = await _locked_conflict(session, conflict_id)
     if row is None:
@@ -1106,6 +1106,19 @@ async def resolve_conflict(
     account = await _load_account(
         session, service_account_id, expect=expect, endpoint_id=endpoint_id
     )
+    # SESS-07 (D-06): the endpoint about to receive the PAT is re-vetted against a
+    # fresh answer, read from its own current URL and flag — pull-direction rows
+    # as the Source, push-direction rows as the Target. ``is_stale_binding`` above
+    # already refused a repointed endpoint, so for a live binding
+    # ``source_conn["base_url"]`` is ``normalize_url(<endpoint url>)`` and the
+    # guarded URL is the dialled one; a flagged endpoint therefore passes the
+    # address check and still cannot pass the stale check.
+    #
+    # The wrapper is imported inside the function on purpose: ``connections.py``
+    # imports ``.conflicts`` at module level, so a module-level import of
+    # ``.outbound`` here (which imports ``.connections``) would close the cycle
+    # ``conflicts -> outbound -> connections -> conflicts``.
+    await _guard_pat_target(session, kind=expect, endpoint_id=endpoint_id)
 
     if row["object_type_attribute_id"] is None:
         raise HTTPException(409, "The conflict carries no attribute anchor.")
